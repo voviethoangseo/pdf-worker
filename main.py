@@ -1,23 +1,28 @@
 import os
 import json
 import uuid
+import zipfile
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from pdf2docx import Converter as Pdf2DocxConverter
 import fitz  # PyMuPDF
 from pypdf import PdfReader, PdfWriter
 import pytesseract
+import csv
 from PIL import Image
 from docx import Document
+import openpyxl
+from pptx import Presentation
+from pptx.util import Pt
 
-app = FastAPI(title="PDF Worker")
+app = FastAPI(title="PDF Worker Multi-tools")
 
 TEMP_DIR = "/tmp/pdf_worker"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 @app.get("/")
 def health_check():
-    return {"status": "ready", "service": "PDF Worker on Render"}
+    return {"status": "ready", "service": "PDF Multi-Worker on Render"}
 
 @app.post("/api/convert")
 async def convert_file(
@@ -36,13 +41,14 @@ async def convert_file(
         f.write(await file.read())
 
     try:
-        # 1. PDF SANG WORD (Bố cục chuẩn bằng pdf2docx)
+        # ==========================================
+        # 1. PDF SANG WORD (pdf2docx)
+        # ==========================================
         if tool == "pdf-to-word":
             output_file = output_path + ".docx"
             mode = opts.get("word_mode", "basic")
 
             if mode == "ocr":
-                # Chế độ OCR tiếng Việt
                 doc_pdf = fitz.open(input_path)
                 doc_word = Document()
                 for page_idx in range(len(doc_pdf)):
@@ -50,23 +56,19 @@ async def convert_file(
                     pix = page.get_pixmap(dpi=150)
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                     text = pytesseract.image_to_string(img, lang="vie")
-                    
                     doc_word.add_heading(f"Trang {page_idx + 1}", level=2)
                     doc_word.add_paragraph(text if text.strip() else "[Không có chữ]")
                 doc_word.save(output_file)
             else:
-                # Chế độ thường: pdf2docx giữ nguyên bảng, khung, chữ
                 cv = Pdf2DocxConverter(input_path)
                 cv.convert(output_file, start=0, end=None)
                 cv.close()
 
-            return FileResponse(
-                output_file, 
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-                filename="result.docx"
-            )
+            return FileResponse(output_file, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="result.docx")
 
+        # ==========================================
         # 2. OCR PDF / PDF TÌM KIẾM ĐƯỢC
+        # ==========================================
         elif tool in ["ocr-pdf", "pdf-searchable"]:
             output_file = output_path + ".docx"
             doc_pdf = fitz.open(input_path)
@@ -79,13 +81,11 @@ async def convert_file(
                 doc_word.add_heading(f"Trang {page_idx + 1}", level=2)
                 doc_word.add_paragraph(text if text.strip() else "[Không có chữ]")
             doc_word.save(output_file)
-            return FileResponse(
-                output_file, 
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-                filename="result.docx"
-            )
+            return FileResponse(output_file, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="result.docx")
 
+        # ==========================================
         # 3. NÉN PDF
+        # ==========================================
         elif tool == "compress-pdf":
             output_file = output_path + ".pdf"
             doc = fitz.open(input_path)
@@ -93,19 +93,212 @@ async def convert_file(
             doc.close()
             return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
+        # ==========================================
         # 4. TÁCH TRANG PDF
+        # ==========================================
         elif tool == "split-pdf":
             output_file = output_path + ".pdf"
             reader = PdfReader(input_path)
             writer = PdfWriter()
-            for i in range(min(3, len(reader.pages))):
+            for i in range(min(5, len(reader.pages))):
                 writer.add_page(reader.pages[i])
             with open(output_file, "wb") as f_out:
                 writer.write(f_out)
             return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
+        # ==========================================
+        # 5. XOAY TRANG PDF
+        # ==========================================
+        elif tool == "rotate-pdf":
+            output_file = output_path + ".pdf"
+            angle = int(opts.get("angle", 90))
+            reader = PdfReader(input_path)
+            writer = PdfWriter()
+            for page in reader.pages:
+                page.rotate(angle)
+                writer.add_page(page)
+            with open(output_file, "wb") as f_out:
+                writer.write(f_out)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
+        # ==========================================
+        # 6. PDF SANG TEXT
+        # ==========================================
+        elif tool == "pdf-to-text":
+            output_file = output_path + ".txt"
+            doc = fitz.open(input_path)
+            text_content = []
+            for page in doc:
+                text_content.append(page.get_text())
+            with open(output_file, "w", encoding="utf-8") as f_out:
+                f_out.write("\n\n--- Trang tiếp ---\n\n".join(text_content))
+            return FileResponse(output_file, media_type="text/plain; charset=utf-8", filename="result.txt")
+
+        # ==========================================
+        # 7. PDF SANG MARKDOWN
+        # ==========================================
+        elif tool == "pdf-to-markdown":
+            output_file = output_path + ".md"
+            doc = fitz.open(input_path)
+            md_content = [f"# {file.filename}\n"]
+            for idx, page in enumerate(doc):
+                md_content.append(f"## Trang {idx + 1}\n\n" + page.get_text())
+            with open(output_file, "w", encoding="utf-8") as f_out:
+                f_out.write("\n\n".join(md_content))
+            return FileResponse(output_file, media_type="text/markdown; charset=utf-8", filename="result.md")
+
+        # ==========================================
+        # 8. PDF SANG JSON
+        # ==========================================
+        elif tool == "pdf-to-json":
+            output_file = output_path + ".json"
+            doc = fitz.open(input_path)
+            pages_data = []
+            for idx, page in enumerate(doc):
+                pages_data.append({
+                    "page": idx + 1,
+                    "text": page.get_text()
+                })
+            with open(output_file, "w", encoding="utf-8") as f_out:
+                json.dump({"total_pages": len(doc), "pages": pages_data}, f_out, ensure_ascii=False, indent=2)
+            return FileResponse(output_file, media_type="application/json; charset=utf-8", filename="result.json")
+
+        # ==========================================
+        # 9. PDF SANG ẢNH (JPG / PNG - Gom thành file ZIP)
+        # ==========================================
+        elif tool in ["pdf-to-jpg", "pdf-to-png"]:
+            img_format = "jpg" if tool == "pdf-to-jpg" else "png"
+            output_zip = output_path + ".zip"
+            doc = fitz.open(input_path)
+
+            with zipfile.ZipFile(output_zip, 'w') as zip_f:
+                for idx, page in enumerate(doc):
+                    pix = page.get_pixmap(dpi=150)
+                    img_name = f"trang_{idx + 1}.{img_format}"
+                    img_temp = os.path.join(TEMP_DIR, f"{req_id}_{img_name}")
+                    pix.save(img_temp)
+                    zip_f.write(img_temp, arcname=img_name)
+                    if os.path.exists(img_temp):
+                        os.remove(img_temp)
+
+            return FileResponse(output_zip, media_type="application/zip", filename="result.zip")
+
+       # ==========================================
+        # 10. ẢNH SANG PDF (JPG / PNG sang PDF)
+        # ==========================================
+        elif tool in ["jpg-to-pdf", "png-to-pdf"]:
+            output_file = output_path + ".pdf"
+            image = Image.open(input_path)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            image.save(output_file, "PDF", resolution=100.0)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
+        # ==========================================
+        # 11. PDF SANG EXCEL (.xlsx)
+        # ==========================================
+        elif tool == "pdf-to-excel":
+            output_file = output_path + ".xlsx"
+            doc = fitz.open(input_path)
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Dữ liệu PDF"
+
+            for page in doc:
+                # Dùng tính năng bóc tách bảng chuyên dụng của PyMuPDF
+                tabs = page.find_tables()
+                if tabs.tables:
+                    for tab in tabs.tables:
+                        for row in tab.extract():
+                            ws.append([cell if cell is not None else "" for cell in row])
+                        ws.append([]) # Dòng trống ngăn cách bảng
+                else:
+                    # Nếu PDF không có viền bảng, bóc từng dòng văn bản
+                    lines = page.get_text("text").split("\n")
+                    for line in lines:
+                        if line.strip():
+                            ws.append([line.strip()])
+
+            wb.save(output_file)
+            return FileResponse(
+                output_file,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                filename="result.xlsx"
+            )
+
+        # ==========================================
+        # 12. PDF SANG CSV (.csv tiếng Việt chuẩn)
+        # ==========================================
+        elif tool == "pdf-to-csv":
+            output_file = output_path + ".csv"
+            doc = fitz.open(input_path)
+
+            with open(output_file, "w", newline="", encoding="utf-8-sig") as f_out:
+                writer = csv.writer(f_out)
+                for page in doc:
+                    tabs = page.find_tables()
+                    if tabs.tables:
+                        for tab in tabs.tables:
+                            for row in tab.extract():
+                                writer.writerow([cell if cell is not None else "" for cell in row])
+                    else:
+                        for line in page.get_text("text").split("\n"):
+                            if line.strip():
+                                writer.writerow([line.strip()])
+
+            return FileResponse(output_file, media_type="text/csv; charset=utf-8", filename="result.csv")
+
+        # ==========================================
+        # 13. PDF SANG POWERPOINT (.pptx theo từng slide)
+        # ==========================================
+        elif tool == "pdf-to-powerpoint":
+            output_file = output_path + ".pptx"
+            doc = fitz.open(input_path)
+            prs = Presentation()
+
+            for page_idx in range(len(doc)):
+                page = doc[page_idx]
+                # Đặt kích thước slide theo đúng kích thước từng trang PDF
+                prs.slide_width = Pt(page.rect.width)
+                prs.slide_height = Pt(page.rect.height)
+                blank_layout = prs.slide_layouts[6]
+                slide = prs.slides.add_slide(blank_layout)
+
+                # Xuất trang PDF thành ảnh chất lượng cao và gắn trọn vẹn vào slide
+                pix = page.get_pixmap(dpi=150)
+                img_temp = os.path.join(TEMP_DIR, f"{req_id}_slide_{page_idx}.png")
+                pix.save(img_temp)
+
+                slide.shapes.add_picture(img_temp, 0, 0, width=Pt(page.rect.width), height=Pt(page.rect.height))
+                if os.path.exists(img_temp):
+                    os.remove(img_temp)
+
+            prs.save(output_file)
+            return FileResponse(
+                output_file,
+                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                filename="result.pptx"
+            )
+
+        # ==========================================
+        # 14. PDF SANG HTML
+        # ==========================================
+        elif tool == "pdf-to-html":
+            output_file = output_path + ".html"
+            doc = fitz.open(input_path)
+            html_parts = ["<!doctype html><html><head><meta charset='utf-8'><title>PDF to HTML</title></head><body>"]
+
+            for page in doc:
+                html_parts.append(page.get_text("html"))
+
+            html_parts.append("</body></html>")
+            with open(output_file, "w", encoding="utf-8") as f_out:
+                f_out.write("\n".join(html_parts))
+
+            return FileResponse(output_file, media_type="text/html; charset=utf-8", filename="result.html")
+
         else:
-            raise HTTPException(status_code=400, detail="Tool chưa được hỗ trợ")
+            raise HTTPException(status_code=400, detail=f"Công cụ {tool} đang được cập nhật thêm")
 
     finally:
         if os.path.exists(input_path):
