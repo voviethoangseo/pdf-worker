@@ -11,9 +11,12 @@ import pytesseract
 import csv
 from PIL import Image
 from docx import Document
+import subprocess
 import openpyxl
 from pptx import Presentation
 from pptx.util import Pt
+from bs4 import BeautifulSoup
+from ebooklib import epub
 
 app = FastAPI(title="PDF Worker Multi-tools")
 
@@ -387,13 +390,80 @@ async def convert_file(
         elif tool == "pdf-to-pdfa":
             output_file = output_path + ".pdf"
             doc = fitz.open(input_path)
-            # Tối ưu hóa stream và làm sạch chuẩn tài liệu lưu trữ
             doc.save(output_file, deflate=True, garbage=3, clean=True)
             doc.close()
             return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
+        # ==========================================
+        # 22. WORD / EXCEL / POWERPOINT SANG PDF (LibreOffice Headless)
+        # ==========================================
+        elif tool in ["word-to-pdf", "excel-to-pdf", "powerpoint-to-pdf"]:
+            # Chạy LibreOffice xuất PDF chuẩn xác 100%
+            cmd = [
+                "soffice", "--headless", "--convert-to", "pdf",
+                "--outdir", TEMP_DIR, input_path
+            ]
+            subprocess.run(cmd, check=True, timeout=120)
+
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+            generated_pdf = os.path.join(TEMP_DIR, f"{base_name}.pdf")
+
+            if os.path.exists(generated_pdf):
+                return FileResponse(generated_pdf, media_type="application/pdf", filename="result.pdf")
+            else:
+                raise HTTPException(status_code=500, detail="Không thể tạo PDF từ tài liệu Office này")
+
+        # ==========================================
+        # 23. PDF SANG SÁCH EPUB (.epub)
+        # ==========================================
+        elif tool == "pdf-to-epub":
+            output_file = output_path + ".epub"
+            doc = fitz.open(input_path)
+            book = epub.EpubBook()
+            book.set_identifier(req_id)
+            book.set_title(file.filename or "Sách PDF chuyển đổi")
+            book.set_language("vi")
+
+            chapters = []
+            for idx, page in enumerate(doc):
+                c = epub.EpubHtml(title=f"Trang {idx + 1}", file_name=f"chap_{idx + 1}.xhtml", lang="vi")
+                c.content = f"<h2>Trang {idx + 1}</h2>" + page.get_text("html")
+                book.add_item(c)
+                chapters.append(c)
+
+            book.toc = tuple(chapters)
+            book.add_item(epub.EpubNcx())
+            book.add_item(epub.EpubNav())
+            book.spine = ["nav"] + chapters
+
+            epub.write_epub(output_file, book, {})
+            return FileResponse(output_file, media_type="application/epub+zip", filename="result.epub")
+
+        # ==========================================
+        # 24. SÁCH EPUB SANG PDF
+        # ==========================================
+        elif tool == "epub-to-pdf":
+            output_file = output_path + ".pdf"
+            book = epub.read_epub(input_path)
+            extracted_text = []
+
+            for item in book.get_items():
+                if item.get_type() == 9: # DOCUMENT
+                    soup = BeautifulSoup(item.get_content(), "html.parser")
+                    text = soup.get_text()
+                    if text.strip():
+                        extracted_text.append(text.strip())
+
+            doc = fitz.open()
+            full_str = "\n\n--- Hết chương ---\n\n".join(extracted_text)
+            page = doc.new_page(width=595, height=842)
+            margin_rect = fitz.Rect(50, 50, 545, 792)
+            page.insert_textbox(margin_rect, full_str, fontsize=11, fontname="helv")
+            doc.save(output_file)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
         else:
-            raise HTTPException(status_code=400, detail=f"Công cụ {tool} đang được cập nhật thêm")
+            raise HTTPException(status_code=400, detail=f"Công cụ {tool} không hợp lệ")
 
     finally:
         if os.path.exists(input_path):
