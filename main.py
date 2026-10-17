@@ -20,7 +20,7 @@ app = FastAPI(title="PDF Worker Multi-tools")
 TEMP_DIR = "/tmp/pdf_worker"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ready", "service": "PDF Multi-Worker on Render"}
 
