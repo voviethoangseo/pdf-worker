@@ -364,11 +364,32 @@ async def convert_file(
                 text_content = f_in.read()
 
             doc = fitz.open()
-            # Tạo trang A4 (595 x 842 points)
             page = doc.new_page(width=595, height=842)
             margin_rect = fitz.Rect(50, 50, 545, 792)
             page.insert_textbox(margin_rect, text_content, fontsize=11, fontname="helv")
             doc.save(output_file)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
+        # ==========================================
+        # 20. HTML SANG PDF
+        # ==========================================
+        elif tool == "html-to-pdf":
+            output_file = output_path + ".pdf"
+            doc = fitz.open(input_path)
+            pdf_bytes = doc.convert_to_pdf()
+            with open(output_file, "wb") as f_out:
+                f_out.write(pdf_bytes)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
+        # ==========================================
+        # 21. PDF SANG PDF/A (Chuẩn lưu trữ số)
+        # ==========================================
+        elif tool == "pdf-to-pdfa":
+            output_file = output_path + ".pdf"
+            doc = fitz.open(input_path)
+            # Tối ưu hóa stream và làm sạch chuẩn tài liệu lưu trữ
+            doc.save(output_file, deflate=True, garbage=3, clean=True)
+            doc.close()
             return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
         else:
