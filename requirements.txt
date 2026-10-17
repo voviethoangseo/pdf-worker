@@ -9,3 +9,5 @@ pytesseract==0.3.10
 Pillow==10.2.0
 openpyxl==3.1.2
 python-pptx==0.6.23
+EbookLib==0.18
+beautifulsoup4==4.12.3
