@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import zipfile
+import gc
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from pdf2docx import Converter as Pdf2DocxConverter
@@ -466,5 +467,10 @@ async def convert_file(
             raise HTTPException(status_code=400, detail=f"Công cụ {tool} không hợp lệ")
 
     finally:
+        # 1. Xóa sạch file input tạm
         if os.path.exists(input_path):
-            os.remove(input_path)
+            try: os.remove(input_path)
+            except Exception: pass
+            
+        # 2. Ép Python thu hồi 100% bộ nhớ RAM ngay lập tức (Chống tràn 512MB RAM)
+        gc.collect()
