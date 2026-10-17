@@ -280,7 +280,7 @@ async def convert_file(
                 filename="result.pptx"
             )
 
-        # ==========================================
+       # ==========================================
         # 14. PDF SANG HTML
         # ==========================================
         elif tool == "pdf-to-html":
@@ -296,6 +296,80 @@ async def convert_file(
                 f_out.write("\n".join(html_parts))
 
             return FileResponse(output_file, media_type="text/html; charset=utf-8", filename="result.html")
+
+        # ==========================================
+        # 15. PDF SANG SVG (Đồ họa vector - Gom file ZIP)
+        # ==========================================
+        elif tool == "pdf-to-svg":
+            output_zip = output_path + ".zip"
+            doc = fitz.open(input_path)
+            with zipfile.ZipFile(output_zip, 'w') as zip_f:
+                for idx, page in enumerate(doc):
+                    svg_content = page.get_svg_image()
+                    svg_name = f"trang_{idx + 1}.svg"
+                    svg_temp = os.path.join(TEMP_DIR, f"{req_id}_{svg_name}")
+                    with open(svg_temp, "w", encoding="utf-8") as f_svg:
+                        f_svg.write(svg_content)
+                    zip_f.write(svg_temp, arcname=svg_name)
+                    if os.path.exists(svg_temp):
+                        os.remove(svg_temp)
+            return FileResponse(output_zip, media_type="application/zip", filename="result.zip")
+
+        # ==========================================
+        # 16. SVG SANG PDF
+        # ==========================================
+        elif tool == "svg-to-pdf":
+            output_file = output_path + ".pdf"
+            doc = fitz.open(input_path)
+            pdf_bytes = doc.convert_to_pdf()
+            with open(output_file, "wb") as f_out:
+                f_out.write(pdf_bytes)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
+        # ==========================================
+        # 17. PDF SANG TIFF (Ảnh in ấn - Gom file ZIP)
+        # ==========================================
+        elif tool == "pdf-to-tiff":
+            output_zip = output_path + ".zip"
+            doc = fitz.open(input_path)
+            with zipfile.ZipFile(output_zip, 'w') as zip_f:
+                for idx, page in enumerate(doc):
+                    pix = page.get_pixmap(dpi=150)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    tif_name = f"trang_{idx + 1}.tiff"
+                    tif_temp = os.path.join(TEMP_DIR, f"{req_id}_{tif_name}")
+                    img.save(tif_temp, format="TIFF")
+                    zip_f.write(tif_temp, arcname=tif_name)
+                    if os.path.exists(tif_temp):
+                        os.remove(tif_temp)
+            return FileResponse(output_zip, media_type="application/zip", filename="result.zip")
+
+        # ==========================================
+        # 18. TIFF SANG PDF
+        # ==========================================
+        elif tool == "tiff-to-pdf":
+            output_file = output_path + ".pdf"
+            image = Image.open(input_path)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            image.save(output_file, "PDF", resolution=100.0)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
+
+        # ==========================================
+        # 19. TEXT / MARKDOWN / CSV SANG PDF (Dàn trang chuẩn A4)
+        # ==========================================
+        elif tool in ["text-to-pdf", "markdown-to-pdf", "csv-to-pdf"]:
+            output_file = output_path + ".pdf"
+            with open(input_path, "r", encoding="utf-8", errors="ignore") as f_in:
+                text_content = f_in.read()
+
+            doc = fitz.open()
+            # Tạo trang A4 (595 x 842 points)
+            page = doc.new_page(width=595, height=842)
+            margin_rect = fitz.Rect(50, 50, 545, 792)
+            page.insert_textbox(margin_rect, text_content, fontsize=11, fontname="helv")
+            doc.save(output_file)
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
         else:
             raise HTTPException(status_code=400, detail=f"Công cụ {tool} đang được cập nhật thêm")
