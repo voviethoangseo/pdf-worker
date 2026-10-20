@@ -3,6 +3,7 @@ import json
 import uuid
 import zipfile
 import gc
+import asyncio
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, Response
 from pdf2docx import Converter as Pdf2DocxConverter
@@ -24,6 +25,10 @@ app = FastAPI(title="PDF Worker Multi-tools")
 TEMP_DIR = "/tmp/pdf_worker"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# KHÓA HÀNG ĐỢI: Chỉ cho phép 1 tác vụ nặng chạy tại 1 thời điểm để bảo vệ 512MB RAM
+# Các yêu cầu đến sau sẽ tự động đứng vào hàng đợi (FIFO) chờ tới lượt
+queue_lock = asyncio.Lock()
+
 # 1. Middleware chặn lệnh HEAD của UptimeRobot và trả về 200 OK ngay lập tức (Chống 405)
 @app.middleware("http")
 async def handle_head_requests(request, call_next):
@@ -42,7 +47,9 @@ async def convert_file(
     tool: str = Form(...),
     options: str = Form("{}")
 ):
-    req_id = str(uuid.uuid4())
+    # Tự động xếp hàng: Nếu có người đang chạy thì người sau sẽ đợi ở đây
+    async with queue_lock:
+        req_id = str(uuid.uuid4())
     opts = json.loads(options) if options else {}
 
     input_ext = os.path.splitext(file.filename)[1] or ".pdf"
