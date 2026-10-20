@@ -4,7 +4,7 @@ import uuid
 import zipfile
 import gc
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pdf2docx import Converter as Pdf2DocxConverter
 import fitz  # PyMuPDF
 from pypdf import PdfReader, PdfWriter
@@ -24,7 +24,15 @@ app = FastAPI(title="PDF Worker Multi-tools")
 TEMP_DIR = "/tmp/pdf_worker"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-@app.api_route("/", methods=["GET", "HEAD"])
+# 1. Middleware chặn lệnh HEAD của UptimeRobot và trả về 200 OK ngay lập tức (Chống 405)
+@app.middleware("http")
+async def handle_head_requests(request, call_next):
+    if request.method == "HEAD" and request.url.path == "/":
+        return Response(status_code=200)
+    return await call_next(request)
+
+# 2. Cổng đón lệnh GET kiểm tra trạng thái bình thường
+@app.get("/")
 def health_check():
     return {"status": "ready", "service": "PDF Multi-Worker on Render"}
 
