@@ -41,16 +41,67 @@ async def handle_head_requests(request, call_next):
 def health_check():
     return {"status": "ready", "service": "PDF Multi-Worker on Render"}
 
+import io
+
+def compress_pdf_engine(input_path: str, output_path: str, level: str = "balanced"):
+    """Nén PDF thực thụ giống iLovePDF: Tái nén ảnh theo DPI và chất lượng JPEG"""
+    quality_map = {
+        "light": {"dpi": 200, "quality": 85},
+        "balanced": {"dpi": 130, "quality": 65},
+        "strong": {"dpi": 72, "quality": 45}
+    }
+    cfg = quality_map.get(level, quality_map["balanced"])
+    
+    doc = fitz.open(input_path)
+    for page in doc:
+        image_list = page.get_images(full=True)
+        for img_info in image_list:
+            xref = img_info[0]
+            try:
+                base_image = doc.extract_image(xref)
+                if not base_image:
+                    continue
+                image_bytes = base_image["image"]
+                pil_img = Image.open(io.BytesIO(image_bytes))
+                
+                # Giảm kích thước ảnh nếu ảnh quá lớn
+                orig_w, orig_h = pil_img.size
+                scale = cfg["dpi"] / 200.0
+                if scale < 1.0 and (orig_w > 1200 or orig_h > 1200):
+                    new_w = max(1, int(orig_w * scale))
+                    new_h = max(1, int(orig_h * scale))
+                    pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                
+                if pil_img.mode != "RGB":
+                    pil_img = pil_img.convert("RGB")
+                    
+                out_buffer = io.BytesIO()
+                pil_img.save(out_buffer, format="JPEG", quality=cfg["quality"], optimize=True)
+                doc.update_stream(xref, out_buffer.getvalue())
+            except Exception:
+                continue
+                
+    doc.save(output_path, garbage=4, deflate=True, clean=True)
+    doc.close()
+
 @app.post("/api/convert")
 async def convert_file(
     file: UploadFile = File(...),
     tool: str = Form(...),
     options: str = Form("{}")
 ):
-    # Tự động xếp hàng: Nếu có người đang chạy thì người sau sẽ đợi ở đây
+    # Khóa toàn bộ tiến trình: Chỉ 1 tác vụ chạy tại 1 thời điểm để bảo toàn 512MB RAM
     async with queue_lock:
         req_id = str(uuid.uuid4())
-    opts = json.loads(options) if options else {}
+        opts = json.loads(options) if options else {}
+        input_ext = os.path.splitext(file.filename)[1] or ".pdf"
+        input_path = os.path.join(TEMP_DIR, f"{req_id}_in{input_ext}")
+        output_path = os.path.join(TEMP_DIR, f"{req_id}_out")
+
+        with open(input_path, "wb") as f:
+            f.write(await file.read())
+
+        try:
 
     input_ext = os.path.splitext(file.filename)[1] or ".pdf"
     input_path = os.path.join(TEMP_DIR, f"{req_id}_in{input_ext}")
@@ -61,55 +112,78 @@ async def convert_file(
 
     try:
         # ==========================================
-        # 1. PDF SANG WORD (pdf2docx)
+        # 1. PDF SANG WORD (Chuẩn hóa 3 chế độ thực thụ)
         # ==========================================
         if tool == "pdf-to-word":
             output_file = output_path + ".docx"
             mode = opts.get("word_mode", "basic")
 
             if mode == "ocr":
+                # Chế độ OCR cho tài liệu scan / ảnh
                 doc_pdf = fitz.open(input_path)
                 doc_word = Document()
                 for page_idx in range(len(doc_pdf)):
                     page = doc_pdf[page_idx]
                     pix = page.get_pixmap(dpi=150)
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    text = pytesseract.image_to_string(img, lang="vie")
+                    text = pytesseract.image_to_string(img, lang="vie+eng")
                     doc_word.add_heading(f"Trang {page_idx + 1}", level=2)
-                    doc_word.add_paragraph(text if text.strip() else "[Không có chữ]")
+                    doc_word.add_paragraph(text if text.strip() else "[Không tìm thấy chữ]")
                 doc_word.save(output_file)
+                doc_pdf.close()
+            elif mode == "advanced":
+                # Chế độ Bố cục chuyên sâu: Phân tích lưới bảng, canh lề, cột đa đoạn
+                cv = Pdf2DocxConverter(input_path)
+                cv.convert(output_file, multi_processing=False, parse_lattice_table=True, parse_stream_table=True)
+                cv.close()
             else:
+                # Chế độ Tiêu chuẩn: Chuyển đổi dòng chảy văn bản tự nhiên, nhẹ và nhanh
                 cv = Pdf2DocxConverter(input_path)
                 cv.convert(output_file, start=0, end=None)
                 cv.close()
 
-            return FileResponse(output_file, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="result.docx")
+            return FileResponse(
+                output_file,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                filename="result.docx"
+            )
 
         # ==========================================
-        # 2. OCR PDF / PDF TÌM KIẾM ĐƯỢC
+        # 2. OCR PDF & PDF TÌM KIẾM ĐƯỢC (Tạo Searchable PDF thật sự)
         # ==========================================
         elif tool in ["ocr-pdf", "pdf-searchable"]:
-            output_file = output_path + ".docx"
-            doc_pdf = fitz.open(input_path)
-            doc_word = Document()
-            for page_idx in range(len(doc_pdf)):
-                page = doc_pdf[page_idx]
+            output_file = output_path + ".pdf"
+            doc = fitz.open(input_path)
+            
+            # Sử dụng công nghệ OCR tích hợp của PyMuPDF kết hợp Tesseract để gắn lớp text ẩn
+            ocr_pdf_bytes = io.BytesIO()
+            for page in doc:
+                # Tạo lớp văn bản OCR nhận diện tiếng Việt
                 pix = page.get_pixmap(dpi=150)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                text = pytesseract.image_to_string(img, lang="vie")
-                doc_word.add_heading(f"Trang {page_idx + 1}", level=2)
-                doc_word.add_paragraph(text if text.strip() else "[Không có chữ]")
-            doc_word.save(output_file)
-            return FileResponse(output_file, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="result.docx")
+                pdf_page_bytes = pytesseract.image_to_pdf_or_hocr(img, extension='pdf', lang='vie+eng')
+                
+                # Nạp trang đã OCR vào tài liệu mới
+                sub_doc = fitz.open("pdf", pdf_page_bytes)
+                doc.insert_pdf(sub_doc)
+                sub_doc.close()
+            
+            # Xóa các trang gốc không có OCR
+            original_page_count = len(doc) // 2
+            for _ in range(original_page_count):
+                doc.delete_page(0)
+                
+            doc.save(output_file, garbage=3, deflate=True)
+            doc.close()
+            return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
         # ==========================================
-        # 3. NÉN PDF
+        # 3. NÉN PDF (Giảm dung lượng ảnh theo mức độ tùy chọn)
         # ==========================================
         elif tool == "compress-pdf":
             output_file = output_path + ".pdf"
-            doc = fitz.open(input_path)
-            doc.save(output_file, garbage=4, deflate=True, clean=True)
-            doc.close()
+            level = opts.get("compress_level", "balanced")
+            compress_pdf_engine(input_path, output_file, level)
             return FileResponse(output_file, media_type="application/pdf", filename="result.pdf")
 
         # ==========================================
